@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/urfave/cli/v3"
@@ -15,6 +16,8 @@ import (
 	"github.com/marcusramberg/gcs-client/cmd/restore"
 	"github.com/marcusramberg/gcs-client/cmd/rm"
 )
+
+var version = "dev"
 
 func main() {
 	cmd := &cli.Command{
@@ -34,6 +37,13 @@ func main() {
 			ls.Command,
 			hash.Command,
 			restore.Command,
+			{
+				Name: "version",
+				Action: func(c context.Context, cmd *cli.Command) error {
+					slog.Info("gcs-client version", "version", version)
+					return nil
+				},
+			},
 		},
 	}
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
