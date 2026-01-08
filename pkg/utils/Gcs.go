@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/option"
 )
 
 var (
@@ -15,8 +16,9 @@ var (
 )
 
 // NewClient creates a new GCS client with robust settings.
-func NewClient(ctx context.Context) (*storage.Client, error) {
-	return storage.NewClient(ctx, storage.WithJSONReads())
+func NewClient(ctx context.Context, opts ...option.ClientOption) (*storage.Client, error) {
+	finalOpts := append([]option.ClientOption{storage.WithJSONReads()}, opts...)
+	return storage.NewClient(ctx, finalOpts...)
 }
 
 // RetryObject returns an ObjectHandle with RetryAlways policy.

@@ -15,6 +15,7 @@ import (
 	"github.com/marcusramberg/gcs-client/cmd/mv"
 	"github.com/marcusramberg/gcs-client/cmd/restore"
 	"github.com/marcusramberg/gcs-client/cmd/rm"
+	"github.com/marcusramberg/gcs-client/cmd/sign-url"
 )
 
 var version = "dev"
@@ -38,6 +39,7 @@ func main() {
 			ls.Command,
 			hash.Command,
 			restore.Command,
+			signurl.Command,
 			{
 				Name: "version",
 				Action: func(c context.Context, cmd *cli.Command) error {
