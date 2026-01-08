@@ -2,6 +2,8 @@ name: Build and Release
 on:
   release:
     types: [created]
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -44,13 +46,10 @@ jobs:
           echo "version=$(git describe --tags --always)" >> $GITHUB_OUTPUT
       - name: Build
         run: |
-          env GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -v -ldflags="-X main.version=${{ steps.version.outputs.version }} -w -s" -o gcs-client .
-      - name: Upload Release Asset
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 # v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          env GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -v -ldflags="-X main.version=${{ steps.version.outputs.version }} -w -s" -o gcs-client-${{ matrix.goos }}-${{ matrix.goarch }} .
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
         with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./gcs-client
-          asset_name: gcs-client-${{ matrix.goos }}-${{ matrix.goarch }}
-          asset_content_type: application/octet-stream
+          files: gcs-client-${{ matrix.goos }}-${{ matrix.goarch }}
