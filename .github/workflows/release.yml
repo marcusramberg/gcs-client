@@ -51,6 +51,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./gcc-client
-          asset_name: gcc-client-${{ matrix.goos }}-${{ matrix.goarch }}
+          asset_path: ./gcs-client
+          asset_name: gcs-client-${{ matrix.goos }}-${{ matrix.goarch }}
           asset_content_type: application/octet-stream
