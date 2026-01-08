@@ -1,0 +1,59 @@
+name: 'Setup GCS Client'
+description: 'Downloads and sets up the gcs-client binary'
+inputs:
+  version:
+    description: 'Version of gcs-client to download'
+    required: false
+    default: 'v0.2.0'
+  command:
+    description: 'Optional gcs-client command to run (e.g., ls gs://bucket)'
+    required: false
+runs:
+  using: 'composite'
+  steps:
+    - name: Download and Run gcs-client
+      shell: bash
+      run: |
+        OS='unknown'
+        case "${{ runner.os }}" in
+          Linux) OS='linux' ;;
+          Windows) OS='windows' ;;
+          macOS) OS='darwin' ;;
+        esac
+
+        ARCH='unknown'
+        case "${{ runner.arch }}" in
+          X64) ARCH='amd64' ;;
+          ARM64) ARCH='arm64' ;;
+        esac
+
+        INSTALL_DIR="$HOME/.gcs-client/bin"
+        FINAL_BINARY="$INSTALL_DIR/gcs-client$( [ "$OS" = "windows" ] && echo ".exe" )"
+
+        if [ ! -f "$FINAL_BINARY" ]; then
+          VERSION="${{ inputs.version }}"
+          BINARY_NAME="gcs-client-$OS-$ARCH"
+          if [ "$OS" = "windows" ]; then
+            BINARY_NAME="$BINARY_NAME.exe"
+          fi
+
+          URL="https://github.com/${{ github.repository }}/releases/download/$VERSION/$BINARY_NAME"
+          echo "Downloading $URL..."
+          curl -L -o "$BINARY_NAME" "$URL"
+          chmod +x "$BINARY_NAME"
+
+          mkdir -p "$INSTALL_DIR"
+          mv "$BINARY_NAME" "$FINAL_BINARY"
+        else
+          echo "gcs-client already installed at $FINAL_BINARY"
+        fi
+
+        if [ -n "${{ inputs.command }}" ]; then
+          echo "Running command: gcs-client ${{ inputs.command }}"
+          "$FINAL_BINARY" ${{ inputs.command }}
+        else
+          # Ensure it's only added to PATH once
+          if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+             echo "$INSTALL_DIR" >> $GITHUB_PATH
+          fi
+        fi
