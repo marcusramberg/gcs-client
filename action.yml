@@ -37,7 +37,7 @@ runs:
             BINARY_NAME="$BINARY_NAME.exe"
           fi
 
-          URL="https://github.com/${{ github.repository }}/releases/download/$VERSION/$BINARY_NAME"
+          URL="https://github.com/marcusramberg/gcs-client/releases/download/$VERSION/$BINARY_NAME"
           echo "Downloading $URL..."
           curl -L -o "$BINARY_NAME" "$URL"
           chmod +x "$BINARY_NAME"
