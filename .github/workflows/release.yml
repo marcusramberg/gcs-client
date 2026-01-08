@@ -46,10 +46,15 @@ jobs:
           echo "version=$(git describe --tags --always)" >> $GITHUB_OUTPUT
       - name: Build
         run: |
-          env GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -v -ldflags="-X main.version=${{ steps.version.outputs.version }} -w -s" -o gcs-client-${{ matrix.goos }}-${{ matrix.goarch }} .
+          BINARY_NAME=gcs-client-${{ matrix.goos }}-${{ matrix.goarch }}
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY_NAME="${BINARY_NAME}.exe"
+          fi
+          env GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -v -ldflags="-X main.version=${{ steps.version.outputs.version }} -w -s" -o ${BINARY_NAME} .
+          echo "BINARY_NAME=${BINARY_NAME}" >> $GITHUB_ENV
 
       - name: Release
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
         with:
-          files: gcs-client-${{ matrix.goos }}-${{ matrix.goarch }}
+          files: ${{ env.BINARY_NAME }}
