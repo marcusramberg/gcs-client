@@ -21,6 +21,7 @@ var version = "dev"
 
 func main() {
 	cmd := &cli.Command{
+		EnableShellCompletion: true,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "project",
