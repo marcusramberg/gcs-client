@@ -32,3 +32,22 @@ GLOBAL OPTIONS:
 
 This is built on the Google Cloud Go SDK, so it uses the same authentication
 methods. Should work with Application Default Credentials, service account keys, and Workload Identity Federation.
+
+## Shell Completion
+
+To enable shell completion, source the completion script for your shell:
+
+### Bash
+```sh
+source <(gcs-client completion bash)
+```
+
+### Zsh
+```sh
+source <(gcs-client completion zsh)
+```
+
+### Fish
+```sh
+gcs-client completion fish | source
+```
