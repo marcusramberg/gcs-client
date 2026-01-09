@@ -143,9 +143,17 @@ func copyLocalToGCS(ctx context.Context, client *storage.Client, src, dest strin
 	}
 
 	w := obj.NewWriter(ctx)
-	w.CacheControl = opts.cacheControl
-	w.ContentType = opts.contentType
-	w.StorageClass = opts.storageClass
+
+	if opts.cacheControl != "" {
+		w.CacheControl = opts.cacheControl
+	}
+	if opts.contentType != "" {
+		w.ContentType = opts.contentType
+	}
+	if opts.storageClass != "" {
+		w.StorageClass = opts.storageClass
+	}
+	w.ChunkSize = 0 // Use single chunk upload
 
 	if _, err := io.Copy(w, f); err != nil {
 		w.Close()
@@ -181,7 +189,7 @@ func copyGCSToLocal(ctx context.Context, client *storage.Client, src, dest strin
 	}
 	defer r.Close()
 
-	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
 
@@ -213,7 +221,7 @@ func copyGCSToLocalRecursive(ctx context.Context, client *storage.Client, bucket
 			rel = filepath.Base(attrs.Name)
 		}
 		subDest := filepath.Join(dest, rel)
-		if err := os.MkdirAll(filepath.Dir(subDest), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(subDest), 0o755); err != nil {
 			return err
 		}
 		if err := copyGCSToLocal(ctx, client, "gs://"+path.Join(bucketName, attrs.Name), subDest, opts); err != nil {
