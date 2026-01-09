@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/urfave/cli/v3"
 
@@ -15,7 +16,7 @@ import (
 	"github.com/marcusramberg/gcs-client/cmd/mv"
 	"github.com/marcusramberg/gcs-client/cmd/restore"
 	"github.com/marcusramberg/gcs-client/cmd/rm"
-	"github.com/marcusramberg/gcs-client/cmd/sign-url"
+	signurl "github.com/marcusramberg/gcs-client/cmd/sign-url"
 )
 
 var version = "dev"
@@ -49,8 +50,20 @@ func main() {
 			},
 		},
 	}
-	if err := cmd.Run(context.Background(), os.Args); err != nil {
-		fmt.Printf("an error occurred: %v\n", err)
-		os.Exit(1)
+	timeout := 300 * time.Second
+	timeoutOption := os.Getenv("GCS_CLIENT_TIMEOUT")
+	if timeoutOption != "" {
+		var err error
+		timeout, err = time.ParseDuration(timeoutOption)
+		if err != nil {
+			slog.Warn("failed to parse GCS_CLIENT_TIMEOUT, using default", "error", err)
+			timeout = 300 * time.Second
+		}
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	if err := cmd.Run(ctx, os.Args); err != nil {
+		fmt.Printf("an error occurred: %v\n", err)
+	}
+	cancel()
 }
