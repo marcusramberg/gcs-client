@@ -16,6 +16,8 @@ runs:
       env:
         RUNNER_OS: ${{ runner.os }}
         RUNNER_ARCH: ${{ runner.arch }}
+        GCS_COMMAND: ${{ inputs.command }}
+        GCS_VERSION: ${{ inputs.version }}
       run: |
         OS='unknown'
         case "$RUNNER_OS" in
@@ -39,13 +41,12 @@ runs:
         FINAL_BINARY="$INSTALL_DIR/gcs-client$( [ "$OS" = "windows" ] && echo ".exe" )"
 
         if [ ! -f "$FINAL_BINARY" ]; then
-          VERSION="${{ inputs.version }}"
           BINARY_NAME="gcs-client-$OS-$ARCH"
           if [ "$OS" = "windows" ]; then
             BINARY_NAME="$BINARY_NAME.exe"
           fi
 
-          URL="https://github.com/marcusramberg/gcs-client/releases/download/$VERSION/$BINARY_NAME"
+          URL="https://github.com/marcusramberg/gcs-client/releases/download/$GCS_VERSION/$BINARY_NAME"
           echo "Downloading $URL..."
           curl -L -o "$BINARY_NAME" "$URL"
           chmod +x "$BINARY_NAME"
@@ -56,9 +57,9 @@ runs:
           echo "gcs-client already installed at $FINAL_BINARY"
         fi
 
-        if [ -n "${{ inputs.command }}" ]; then
-          echo "Running command: gcs-client ${{ inputs.command }}"
-          "$FINAL_BINARY" ${{ inputs.command }}
+        if [ -n "$GCS_COMMAND" ]; then
+          echo "Running command: gcs-client $GCS_COMMAND"
+          "$FINAL_BINARY" $GCS_COMMAND
         else
           # Ensure it's only added to PATH once
           if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
