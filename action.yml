@@ -13,19 +13,27 @@ runs:
   steps:
     - name: Download and Run gcs-client
       shell: bash
+      env:
+        RUNNER_OS: ${{ runner.os }}
+        RUNNER_ARCH: ${{ runner.arch }}
       run: |
         OS='unknown'
-        case "${{ runner.os }}" in
+        case "$RUNNER_OS" in
           Linux) OS='linux' ;;
           Windows) OS='windows' ;;
           macOS) OS='darwin' ;;
         esac
 
         ARCH='unknown'
-        case "${{ runner.arch }}" in
+        case "$RUNNER_ARCH" in
           X64) ARCH='amd64' ;;
           ARM64) ARCH='arm64' ;;
         esac
+
+        if [ "$OS" = "unknown" ] || [ "$ARCH" = "unknown" ]; then
+          echo "Error: Failed to detect OS ($RUNNER_OS) or architecture ($RUNNER_ARCH)"
+          exit 1
+        fi
 
         INSTALL_DIR="$HOME/.gcs-client/bin"
         FINAL_BINARY="$INSTALL_DIR/gcs-client$( [ "$OS" = "windows" ] && echo ".exe" )"
