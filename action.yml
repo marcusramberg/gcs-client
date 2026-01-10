@@ -38,7 +38,13 @@ runs:
         fi
 
         INSTALL_DIR="$HOME/.gcs-client/bin"
-        FINAL_BINARY="$INSTALL_DIR/gcs-client$( [ "$OS" = "windows" ] && echo ".exe" )"
+
+        # Determine binary name
+        if [ "$OS" = "windows" ]; then
+          FINAL_BINARY="$INSTALL_DIR/gcs-client.exe"
+        else
+          FINAL_BINARY="$INSTALL_DIR/gcs-client"
+        fi
 
         if [ ! -f "$FINAL_BINARY" ]; then
           BINARY_NAME="gcs-client-$OS-$ARCH"
