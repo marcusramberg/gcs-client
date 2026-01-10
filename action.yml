@@ -4,7 +4,7 @@ inputs:
   version:
     description: 'Version of gcs-client to download'
     required: false
-    default: 'v0.2.1'
+    default: 'v0.2.2'
   command:
     description: 'Optional gcs-client command to run (e.g., ls gs://bucket)'
     required: false

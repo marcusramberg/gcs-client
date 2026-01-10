@@ -64,10 +64,10 @@ You can use this in your GitHub Actions workflows to quickly set up the `gcs-cli
 
 ```yaml
 # Option 1: Set up the binary in PATH
-- uses: marcusramberg/gcs-client@v0.2.0
+- uses: marcusramberg/gcs-client@v0.2.2
 
 # Option 2: Run a specific command without modifying PATH
-- uses: marcusramberg/gcs-client@v0.2.0
+- uses: marcusramberg/gcs-client@v0.2.2
   with:
     command: ls gs://my-bucket
 ```
