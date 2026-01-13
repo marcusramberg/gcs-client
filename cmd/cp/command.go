@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/urfave/cli/v3"
@@ -25,6 +26,7 @@ var Command = &cli.Command{
 	Flags: []cli.Flag{
 		&cli.BoolFlag{Name: "recursive", Aliases: []string{"r"}, Usage: "Recursive copy"},
 		&cli.BoolFlag{Name: "no-clobber", Aliases: []string{"n"}, Usage: "Do not overwrite existing files"},
+		&cli.BoolFlag{Name: "verbose", Aliases: []string{"v"}, Usage: "Show progress periodically while copying"},
 		&cli.StringFlag{Name: "cache-control", Usage: "Set cache-control header"},
 		&cli.StringFlag{Name: "content-type", Usage: "Set content-type header"},
 		&cli.StringFlag{Name: "storage-class", Usage: "Set storage class"},
@@ -41,6 +43,7 @@ var Command = &cli.Command{
 		opts := &copyOptions{
 			recursive:    cmd.Bool("recursive"),
 			noClobber:    cmd.Bool("no-clobber"),
+			verbose:      cmd.Bool("verbose"),
 			cacheControl: cmd.String("cache-control"),
 			contentType:  cmd.String("content-type"),
 			storageClass: cmd.String("storage-class"),
@@ -65,9 +68,39 @@ var Command = &cli.Command{
 type copyOptions struct {
 	recursive    bool
 	noClobber    bool
+	verbose      bool
 	cacheControl string
 	contentType  string
 	storageClass string
+}
+
+type progressReader struct {
+	r         io.Reader
+	total     int64
+	current   int64
+	lastPrint time.Time
+	verbose   bool
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.r.Read(p)
+	pr.current += int64(n)
+	if pr.verbose {
+		pr.print()
+	}
+	return n, err
+}
+
+func (pr *progressReader) print() {
+	if time.Since(pr.lastPrint) < 500*time.Millisecond {
+		return
+	}
+	pr.lastPrint = time.Now()
+	percent := 0.0
+	if pr.total > 0 {
+		percent = float64(pr.current) / float64(pr.total) * 100
+	}
+	fmt.Fprintf(os.Stderr, "\rProgress: %d/%d (%.1f%%)", pr.current, pr.total, percent)
 }
 
 func performCopy(ctx context.Context, client *storage.Client, src, dest string, opts *copyOptions) error {
@@ -131,11 +164,20 @@ func copyLocalToGCS(ctx context.Context, client *storage.Client, src, dest strin
 		objectName = path.Join(objectName, filepath.Base(src))
 	}
 
+	if opts.verbose {
+		fmt.Fprintf(os.Stderr, "Copying %s to gs://%s/%s\n", src, bucketName, objectName)
+	}
+
 	f, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("failed to open local source: %w", err)
 	}
 	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat local source: %w", err)
+	}
 
 	obj := utils.RetryObject(utils.RetryBucket(client, bucketName), objectName)
 	if opts.noClobber {
@@ -155,9 +197,17 @@ func copyLocalToGCS(ctx context.Context, client *storage.Client, src, dest strin
 	}
 	w.ChunkSize = 0 // Use single chunk upload
 
-	if _, err := io.Copy(w, f); err != nil {
+	var reader io.Reader = f
+	if opts.verbose {
+		reader = &progressReader{r: f, total: fi.Size(), verbose: true}
+	}
+
+	if _, err := io.Copy(w, reader); err != nil {
 		w.Close()
 		return fmt.Errorf("failed to copy to GCS: %w", err)
+	}
+	if opts.verbose {
+		fmt.Fprintln(os.Stderr)
 	}
 
 	return w.Close()
@@ -172,6 +222,10 @@ func copyGCSToLocal(ctx context.Context, client *storage.Client, src, dest strin
 	fi, err := os.Stat(dest)
 	if err == nil && fi.IsDir() {
 		dest = filepath.Join(dest, filepath.Base(objectName))
+	}
+
+	if opts.verbose {
+		fmt.Fprintf(os.Stderr, "Copying gs://%s/%s to %s\n", bucketName, objectName, dest)
 	}
 
 	if opts.noClobber {
@@ -199,8 +253,16 @@ func copyGCSToLocal(ctx context.Context, client *storage.Client, src, dest strin
 	}
 	defer f.Close()
 
-	if _, err := io.Copy(f, r); err != nil {
+	var reader io.Reader = r
+	if opts.verbose {
+		reader = &progressReader{r: r, total: r.Attrs.Size, verbose: true}
+	}
+
+	if _, err := io.Copy(f, reader); err != nil {
 		return fmt.Errorf("failed to copy from GCS: %w", err)
+	}
+	if opts.verbose {
+		fmt.Fprintln(os.Stderr)
 	}
 
 	return nil
@@ -245,6 +307,10 @@ func copyGCSToGCS(ctx context.Context, client *storage.Client, src, dest string,
 		destObject = path.Join(destObject, filepath.Base(srcObject))
 	}
 
+	if opts.verbose {
+		fmt.Fprintf(os.Stderr, "Copying gs://%s/%s to gs://%s/%s\n", srcBucket, srcObject, destBucket, destObject)
+	}
+
 	if opts.noClobber {
 		if _, err := utils.RetryObject(utils.RetryBucket(client, destBucket), destObject).Attrs(ctx); err == nil {
 			return nil // Skip
@@ -255,12 +321,29 @@ func copyGCSToGCS(ctx context.Context, client *storage.Client, src, dest string,
 	destObj := utils.RetryObject(utils.RetryBucket(client, destBucket), destObject)
 
 	copier := destObj.CopierFrom(srcObj)
+	if opts.verbose {
+		lastPrint := time.Now()
+		copier.ProgressFunc = func(copied, total uint64) {
+			if time.Since(lastPrint) < 500*time.Millisecond {
+				return
+			}
+			lastPrint = time.Now()
+			percent := 0.0
+			if total > 0 {
+				percent = float64(copied) / float64(total) * 100
+			}
+			fmt.Fprintf(os.Stderr, "\rProgress: %d/%d (%.1f%%)", copied, total, percent)
+		}
+	}
 
 	if _, err := copier.Run(ctx); err != nil {
 		if opts.recursive {
 			return copyGCSToGCSRecursive(ctx, client, srcBucket, srcObject, destBucket, destObject, opts)
 		}
 		return fmt.Errorf("failed to copy GCS to GCS: %w", err)
+	}
+	if opts.verbose {
+		fmt.Fprintln(os.Stderr)
 	}
 
 	return nil
@@ -294,6 +377,10 @@ func copyLocalToLocal(src, dest string, opts *copyOptions) error {
 		dest = filepath.Join(dest, filepath.Base(src))
 	}
 
+	if opts.verbose {
+		fmt.Fprintf(os.Stderr, "Copying %s to %s\n", src, dest)
+	}
+
 	if opts.noClobber {
 		if _, err := os.Stat(dest); err == nil {
 			return nil
@@ -306,12 +393,25 @@ func copyLocalToLocal(src, dest string, opts *copyOptions) error {
 	}
 	defer sf.Close()
 
+	sfi, err := sf.Stat()
+	if err != nil {
+		return err
+	}
+
 	df, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
 	defer df.Close()
 
-	_, err = io.Copy(df, sf)
+	var reader io.Reader = sf
+	if opts.verbose {
+		reader = &progressReader{r: sf, total: sfi.Size(), verbose: true}
+	}
+
+	_, err = io.Copy(df, reader)
+	if opts.verbose {
+		fmt.Fprintln(os.Stderr)
+	}
 	return err
 }
