@@ -11,11 +11,9 @@ import (
 	"google.golang.org/api/option"
 )
 
-var (
-	ErrInvalidGCSPath = errors.New("invalid GCS path")
-)
+var ErrInvalidGCSPath = errors.New("invalid GCS path")
 
-// NewClient creates a new GCS client with robust settings.
+// NewClient creates a new GCS client using the JSON api
 func NewClient(ctx context.Context, opts ...option.ClientOption) (*storage.Client, error) {
 	finalOpts := append([]option.ClientOption{storage.WithJSONReads()}, opts...)
 	return storage.NewClient(ctx, finalOpts...)
