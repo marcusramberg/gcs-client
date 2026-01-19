@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5" //nolint:gosec
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -20,6 +21,12 @@ var Command = &cli.Command{
 	Name:      "hash",
 	Usage:     "Calculate or retrieve hashes for GCS objects or local files",
 	ArgsUsage: "[TARGET ...]",
+	Flags: []cli.Flag{
+		&cli.BoolFlag{
+			Name:    "json",
+			Aliases: []string{"j"},
+		},
+	},
 	Action: func(ctx context.Context, cmd *cli.Command) error {
 		if cmd.Args().Len() < 1 {
 			return fmt.Errorf("%w: hash command requires at least 1 argument", utils.ErrInvalidArgs)
@@ -33,11 +40,11 @@ var Command = &cli.Command{
 
 		for _, arg := range cmd.Args().Slice() {
 			if strings.HasPrefix(arg, "gs://") {
-				if err := hashGCS(ctx, client, arg); err != nil {
+				if err := hashGCS(ctx, client, arg, cmd.Bool("json")); err != nil {
 					return err
 				}
 			} else {
-				if err := hashLocal(arg); err != nil {
+				if err := hashLocal(arg, cmd.Bool("json")); err != nil {
 					return err
 				}
 			}
@@ -46,7 +53,7 @@ var Command = &cli.Command{
 	},
 }
 
-func hashLocal(path string) error {
+func hashLocal(path string, wantJSON bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -61,13 +68,29 @@ func hashLocal(path string) error {
 		return err
 	}
 
+	if wantJSON {
+		out := struct {
+			CRC32C uint32 `json:"crc32c"`
+			MD5    []byte `json:"md5"`
+		}{
+			CRC32C: c.Sum32(),
+			MD5:    m.Sum(nil),
+		}
+		b, err := json.Marshal(out)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(b))
+		return nil
+	}
+
 	fmt.Printf("Hashes for %s:\n", path)
 	fmt.Printf("  CRC32C: %08x\n", c.Sum32())
 	fmt.Printf("  MD5:    %s\n", base64.StdEncoding.EncodeToString(m.Sum(nil)))
 	return nil
 }
 
-func hashGCS(ctx context.Context, client *storage.Client, path string) error {
+func hashGCS(ctx context.Context, client *storage.Client, path string, wantJSON bool) error {
 	bucket, object, _, err := utils.ParseGCSPath(path)
 	if err != nil {
 		return err
@@ -76,6 +99,14 @@ func hashGCS(ctx context.Context, client *storage.Client, path string) error {
 	attrs, err := utils.RetryObject(utils.RetryBucket(client, bucket), object).Attrs(ctx)
 	if err != nil {
 		return err
+	}
+	if wantJSON {
+		b, err := json.Marshal(attrs)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(b))
+		return nil
 	}
 
 	fmt.Printf("Hashes for %s:\n", path)
