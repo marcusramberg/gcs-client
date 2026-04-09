@@ -35,6 +35,10 @@ jobs:
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version: '1.26'
+      - name: Install UPX
+        uses: crazy-max/ghaction-upx@v3
+        with:
+          install-only: true
       - name: Check out code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Set version
@@ -49,6 +53,7 @@ jobs:
           fi
           env GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -v -ldflags="-X main.version=${{ steps.version.outputs.version }} -w -s" -o ${BINARY_NAME} .
           echo "BINARY_NAME=${BINARY_NAME}" >> $GITHUB_ENV
+      - run: upx --best -q --force-macos ${{ env.BINARY_NAME }}
 
       - name: Release
         uses: softprops/action-gh-release@v2
