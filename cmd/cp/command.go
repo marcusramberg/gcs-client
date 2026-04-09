@@ -107,13 +107,9 @@ func performCopy(ctx context.Context, client *storage.Client, src, dest string, 
 	srcIsGCS := strings.HasPrefix(src, "gs://")
 	destIsGCS := strings.HasPrefix(dest, "gs://")
 
-	if !srcIsGCS && opts.recursive {
-		if err := copyLocalRecursive(ctx, client, src, dest, opts); err != nil {
-			return err
-		}
-	}
-
 	switch {
+	case !srcIsGCS && opts.recursive:
+		return copyLocalRecursive(ctx, client, src, dest, opts)
 	case srcIsGCS && destIsGCS:
 		return copyGCSToGCS(ctx, client, src, dest, opts)
 	case srcIsGCS:
@@ -147,10 +143,11 @@ func copyLocalRecursive(ctx context.Context, client *storage.Client, src, dest s
 		if destIsGCS {
 			bucket, object, _, _ := utils.ParseGCSPath(dest)
 			subDest = "gs://" + path.Join(bucket, object, rel)
+			return copyLocalToGCS(ctx, client, p, subDest, opts)
 		} else {
 			subDest = filepath.Join(dest, rel)
+			return copyLocalToLocal(p, subDest, opts)
 		}
-		return performCopy(ctx, client, p, subDest, opts)
 	})
 }
 
