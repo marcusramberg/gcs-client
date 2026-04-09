@@ -62,7 +62,7 @@ var Command = &cli.Command{
 
 		var opts []option.ClientOption
 		if keyFile := cmd.String("private-key-file"); keyFile != "" {
-			opts = append(opts, option.WithCredentialsFile(keyFile))
+			opts = append(opts, option.WithAuthCredentialsFile(option.ServiceAccount, keyFile))
 		}
 
 		client, err := utils.NewClient(ctx, opts...)
