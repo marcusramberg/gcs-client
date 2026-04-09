@@ -23,7 +23,8 @@ var version = "dev"
 
 func main() {
 	cmd := &cli.Command{
-		EnableShellCompletion: true,
+		EnableShellCompletion:  true,
+		UseShortOptionHandling: true,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "project",
