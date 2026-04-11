@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/option"
@@ -102,35 +103,6 @@ func TestCopyGCSToLocalRecursiveWithHookDispatchesAllObjects(t *testing.T) {
 	}
 }
 
-func TestProgressReaderConcurrentPrintDoesNotRace(t *testing.T) {
-	t.Parallel()
-	// Use a shared progressReader to verify concurrent Read() calls are race-free.
-	// Each Read() increments current and may call printLocked() — both under mu.
-	// The underlying reader is wrapped with a mutex so it is safe to call from
-	// multiple goroutines; the point is to exercise progressReader's own locking.
-	content := strings.Repeat("x", 1000)
-	var rMu sync.Mutex
-	inner := strings.NewReader(content)
-	safeR := readerFunc(func(p []byte) (int, error) {
-		rMu.Lock()
-		defer rMu.Unlock()
-		return inner.Read(p)
-	})
-	pr := &progressReader{
-		r:       safeR,
-		total:   int64(len(content)),
-		verbose: true,
-	}
-	var wg sync.WaitGroup
-	for range 10 {
-		wg.Go(func() {
-			buf := make([]byte, 100)
-			_, _ = pr.Read(buf)
-		})
-	}
-	wg.Wait()
-}
-
 func TestUploadChunkSizeSmallFile(t *testing.T) {
 	t.Parallel()
 	// Files smaller than defaultChunkSize should use a chunk size slightly
@@ -205,7 +177,94 @@ func TestBuildClientOptionsPoolSizeMatchesParallelism(t *testing.T) {
 	}
 }
 
-// readerFunc is an io.Reader backed by a function.
-type readerFunc func([]byte) (int, error)
+func TestFormatBytes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		n    int64
+		want string
+	}{
+		{0, "0 B"},
+		{1, "1 B"},
+		{1023, "1023 B"},
+		{1024, "1.0 KiB"},
+		{1536, "1.5 KiB"},
+		{1048575, "1024.0 KiB"},
+		{1048576, "1.0 MiB"},
+		{1572864, "1.5 MiB"},
+		{1073741823, "1024.0 MiB"},
+		{1073741824, "1.0 GiB"},
+		{1610612736, "1.5 GiB"},
+	}
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("%d", tc.n), func(t *testing.T) {
+			t.Parallel()
+			got := formatBytes(tc.n)
+			if got != tc.want {
+				t.Errorf("formatBytes(%d) = %q, want %q", tc.n, got, tc.want)
+			}
+		})
+	}
+}
 
-func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+func TestTransferStatsRecordConcurrentSafety(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	ts := &transferStats{w: &buf, startTime: time.Now()}
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Go(func() {
+			ts.record(fmt.Sprintf("gs://bucket/file%d.txt", i), 1024*1024, 100*time.Millisecond)
+		})
+	}
+	wg.Wait()
+	// Use summary() to read the counters safely through the lock.
+	ts.summary()
+	got := buf.String()
+	if !strings.Contains(got, "20 files") {
+		t.Errorf("expected summary to contain '20 files', got: %q", got)
+	}
+	if !strings.Contains(got, "20.0 MiB") {
+		t.Errorf("expected summary to contain '20.0 MiB', got: %q", got)
+	}
+}
+
+func TestTransferStatsSummaryOutput(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	ts := &transferStats{
+		w:         &buf,
+		startTime: time.Now().Add(-2 * time.Second), // simulate 2s elapsed
+		files:     3,
+		bytes:     3 * 1024 * 1024, // 3 MiB
+	}
+	ts.summary()
+	got := buf.String()
+	if !strings.Contains(got, "3 files") {
+		t.Errorf("summary output missing file count: %q", got)
+	}
+	if !strings.Contains(got, "3.0 MiB") {
+		t.Errorf("summary output missing byte count: %q", got)
+	}
+	if !strings.Contains(got, "MB/s") {
+		t.Errorf("summary output missing throughput: %q", got)
+	}
+}
+
+func TestTransferStatsSummarySingularFile(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	ts := &transferStats{
+		w:         &buf,
+		startTime: time.Now().Add(-time.Second),
+		files:     1,
+		bytes:     512,
+	}
+	ts.summary()
+	got := buf.String()
+	if !strings.Contains(got, "1 file,") {
+		t.Errorf("expected singular 'file', got: %q", got)
+	}
+	if strings.Contains(got, "1 files") {
+		t.Errorf("should not use plural for 1 file, got: %q", got)
+	}
+}

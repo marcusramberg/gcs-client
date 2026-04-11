@@ -29,7 +29,7 @@ var Command = &cli.Command{
 	Flags: []cli.Flag{
 		&cli.BoolFlag{Name: "recursive", Aliases: []string{"r"}, Usage: "Recursive copy"},
 		&cli.BoolFlag{Name: "no-clobber", Aliases: []string{"n"}, Usage: "Do not overwrite existing files"},
-		&cli.BoolFlag{Name: "verbose", Aliases: []string{"v"}, Usage: "Show progress periodically while copying"},
+		&cli.BoolFlag{Name: "verbose", Aliases: []string{"v"}, Usage: "Output progress per file and a summary"},
 		&cli.StringFlag{Name: "cache-control", Usage: "Set cache-control header"},
 		&cli.StringFlag{Name: "content-type", Usage: "Set content-type header"},
 		&cli.StringFlag{Name: "storage-class", Usage: "Set storage class"},
@@ -61,6 +61,10 @@ var Command = &cli.Command{
 		opts.parallelism = cmd.Int("parallelism")
 		opts.setDefaults()
 
+		if opts.verbose {
+			opts.stats = &transferStats{w: os.Stderr, startTime: time.Now()}
+		}
+
 		client, err := utils.NewClient(ctx, buildClientOptions(opts.parallelism)...)
 		if err != nil {
 			return fmt.Errorf("failed to create GCS client: %w", err)
@@ -73,6 +77,9 @@ var Command = &cli.Command{
 			}
 		}
 
+		if opts.stats != nil {
+			opts.stats.summary()
+		}
 		return nil
 	},
 }
@@ -97,44 +104,13 @@ type copyOptions struct {
 	contentType  string
 	storageClass string
 	parallelism  int
+	stats        *transferStats
 }
 
 func (o *copyOptions) setDefaults() {
 	if o.parallelism <= 0 {
 		o.parallelism = runtime.NumCPU()
 	}
-}
-
-type progressReader struct {
-	r         io.Reader
-	total     int64
-	current   int64
-	lastPrint time.Time
-	verbose   bool
-	mu        sync.Mutex
-}
-
-func (pr *progressReader) Read(p []byte) (int, error) {
-	n, err := pr.r.Read(p)
-	pr.mu.Lock()
-	pr.current += int64(n)
-	if pr.verbose {
-		pr.printLocked()
-	}
-	pr.mu.Unlock()
-	return n, err
-}
-
-func (pr *progressReader) printLocked() {
-	if time.Since(pr.lastPrint) < 500*time.Millisecond {
-		return
-	}
-	pr.lastPrint = time.Now()
-	percent := 0.0
-	if pr.total > 0 {
-		percent = float64(pr.current) / float64(pr.total) * 100
-	}
-	fmt.Fprintf(os.Stderr, "\rProgress: %d/%d (%.1f%%)", pr.current, pr.total, percent)
 }
 
 func performCopy(ctx context.Context, client *storage.Client, src, dest string, opts *copyOptions) error {
@@ -224,6 +200,74 @@ func uploadChunkSize(fileSize int64) int {
 	return int(chunks * int64(minChunk))
 }
 
+// formatBytes returns a human-readable representation of n bytes.
+func formatBytes(n int64) string {
+	const (
+		kib = 1024
+		mib = 1024 * kib
+		gib = 1024 * mib
+	)
+	switch {
+	case n >= gib:
+		return fmt.Sprintf("%.1f GiB", float64(n)/float64(gib))
+	case n >= mib:
+		return fmt.Sprintf("%.1f MiB", float64(n)/float64(mib))
+	case n >= kib:
+		return fmt.Sprintf("%.1f KiB", float64(n)/float64(kib))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// transferStats collects per-transfer results and prints CI-friendly output.
+// All methods are safe to call concurrently from multiple goroutines.
+type transferStats struct {
+	mu        sync.Mutex
+	files     int64
+	bytes     int64
+	startTime time.Time
+	w         io.Writer // stderr by default; override in tests
+}
+
+// record prints a completion line for one transfer and updates totals.
+// dst is the destination path (GCS URI or local path).
+// n is the number of bytes transferred. elapsed is the per-file wall time.
+func (ts *transferStats) record(dst string, n int64, elapsed time.Duration) {
+	mbps := 0.0
+	if elapsed > 0 {
+		mbps = float64(n) / elapsed.Seconds() / 1e6
+	}
+	line := fmt.Sprintf("Copied %s (%s, %.1f MB/s)\n", dst, formatBytes(n), mbps)
+	ts.mu.Lock()
+	ts.files++
+	ts.bytes += n
+	fmt.Fprint(ts.w, line)
+	ts.mu.Unlock()
+}
+
+// summary prints the aggregate transfer summary to ts.w.
+// Call once after all transfers complete.
+func (ts *transferStats) summary() {
+	ts.mu.Lock()
+	files := ts.files
+	bytes := ts.bytes
+	ts.mu.Unlock()
+
+	elapsed := time.Since(ts.startTime)
+	mbps := 0.0
+	if elapsed > 0 {
+		mbps = float64(bytes) / elapsed.Seconds() / 1e6
+	}
+	fileWord := "files"
+	if files == 1 {
+		fileWord = "file"
+	}
+	// summary() is called after all transfers complete, so no concurrent
+	// writes are expected; no lock needed for the write here.
+	fmt.Fprintf(ts.w, "\nOperation completed: %d %s, %s transferred in %.1fs (%.1f MB/s)\n",
+		files, fileWord, formatBytes(bytes), elapsed.Seconds(), mbps)
+}
+
 func copyLocalToGCS(ctx context.Context, client *storage.Client, src, dest string, opts *copyOptions) error {
 	bucketName, objectName, _, err := utils.ParseGCSPath(dest)
 	if err != nil {
@@ -232,10 +276,6 @@ func copyLocalToGCS(ctx context.Context, client *storage.Client, src, dest strin
 
 	if strings.HasSuffix(dest, "/") || objectName == "" {
 		objectName = path.Join(objectName, filepath.Base(src))
-	}
-
-	if opts.verbose {
-		fmt.Fprintf(os.Stderr, "Copying %s to gs://%s/%s\n", src, bucketName, objectName)
 	}
 
 	f, err := os.Open(src)
@@ -267,20 +307,19 @@ func copyLocalToGCS(ctx context.Context, client *storage.Client, src, dest strin
 	}
 	w.ChunkSize = uploadChunkSize(fi.Size())
 
-	var reader io.Reader = f
-	if opts.verbose {
-		reader = &progressReader{r: f, total: fi.Size(), verbose: true}
-	}
-
-	if _, err := io.Copy(w, reader); err != nil {
+	start := time.Now()
+	n, err := io.Copy(w, f)
+	if err != nil {
 		w.Close()
 		return fmt.Errorf("failed to copy to GCS: %w", err)
 	}
-	if opts.verbose {
-		fmt.Fprintln(os.Stderr)
+	if err := w.Close(); err != nil {
+		return err
 	}
-
-	return w.Close()
+	if opts.stats != nil {
+		opts.stats.record(fmt.Sprintf("gs://%s/%s", bucketName, objectName), n, time.Since(start))
+	}
+	return nil
 }
 
 func copyGCSToLocal(ctx context.Context, client *storage.Client, src, dest string, opts *copyOptions) error {
@@ -292,10 +331,6 @@ func copyGCSToLocal(ctx context.Context, client *storage.Client, src, dest strin
 	fi, err := os.Stat(dest)
 	if err == nil && fi.IsDir() {
 		dest = filepath.Join(dest, filepath.Base(objectName))
-	}
-
-	if opts.verbose {
-		fmt.Fprintf(os.Stderr, "Copying gs://%s/%s to %s\n", bucketName, objectName, dest)
 	}
 
 	if opts.noClobber {
@@ -313,6 +348,8 @@ func copyGCSToLocal(ctx context.Context, client *storage.Client, src, dest strin
 	}
 	defer r.Close()
 
+	objectSize := r.Attrs.Size
+
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
@@ -323,18 +360,13 @@ func copyGCSToLocal(ctx context.Context, client *storage.Client, src, dest strin
 	}
 	defer f.Close()
 
-	var reader io.Reader = r
-	if opts.verbose {
-		reader = &progressReader{r: r, total: r.Attrs.Size, verbose: true}
-	}
-
-	if _, err := io.Copy(f, reader); err != nil {
+	start := time.Now()
+	if _, err := io.Copy(f, r); err != nil {
 		return fmt.Errorf("failed to copy from GCS: %w", err)
 	}
-	if opts.verbose {
-		fmt.Fprintln(os.Stderr)
+	if opts.stats != nil {
+		opts.stats.record(dest, objectSize, time.Since(start))
 	}
-
 	return nil
 }
 
@@ -388,10 +420,6 @@ func copyGCSToGCS(ctx context.Context, client *storage.Client, src, dest string,
 		destObject = path.Join(destObject, filepath.Base(srcObject))
 	}
 
-	if opts.verbose {
-		fmt.Fprintf(os.Stderr, "Copying gs://%s/%s to gs://%s/%s\n", srcBucket, srcObject, destBucket, destObject)
-	}
-
 	if opts.noClobber {
 		if _, err := utils.RetryObject(utils.RetryBucket(client, destBucket), destObject).Attrs(ctx); err == nil {
 			return nil // Skip
@@ -401,32 +429,24 @@ func copyGCSToGCS(ctx context.Context, client *storage.Client, src, dest string,
 	srcObj := utils.RetryObject(utils.RetryBucket(client, srcBucket), srcObject)
 	destObj := utils.RetryObject(utils.RetryBucket(client, destBucket), destObject)
 
-	copier := destObj.CopierFrom(srcObj)
-	if opts.verbose {
-		lastPrint := time.Now()
-		copier.ProgressFunc = func(copied, total uint64) {
-			if time.Since(lastPrint) < 500*time.Millisecond {
-				return
-			}
-			lastPrint = time.Now()
-			percent := 0.0
-			if total > 0 {
-				percent = float64(copied) / float64(total) * 100
-			}
-			fmt.Fprintf(os.Stderr, "\rProgress: %d/%d (%.1f%%)", copied, total, percent)
-		}
+	// Fetch size before copy so we can report bytes transferred.
+	var objectSize int64
+	if attrs, err := srcObj.Attrs(ctx); err == nil {
+		objectSize = attrs.Size
 	}
 
+	copier := destObj.CopierFrom(srcObj)
+
+	start := time.Now()
 	if _, err := copier.Run(ctx); err != nil {
 		if opts.recursive {
 			return copyGCSToGCSRecursive(ctx, client, srcBucket, srcObject, destBucket, destObject, opts)
 		}
 		return fmt.Errorf("failed to copy GCS to GCS: %w", err)
 	}
-	if opts.verbose {
-		fmt.Fprintln(os.Stderr)
+	if opts.stats != nil {
+		opts.stats.record(fmt.Sprintf("gs://%s/%s", destBucket, destObject), objectSize, time.Since(start))
 	}
-
 	return nil
 }
 
@@ -469,10 +489,6 @@ func copyLocalToLocal(src, dest string, opts *copyOptions) error {
 		dest = filepath.Join(dest, filepath.Base(src))
 	}
 
-	if opts.verbose {
-		fmt.Fprintf(os.Stderr, "Copying %s to %s\n", src, dest)
-	}
-
 	if opts.noClobber {
 		if _, err := os.Stat(dest); err == nil {
 			return nil
@@ -485,25 +501,19 @@ func copyLocalToLocal(src, dest string, opts *copyOptions) error {
 	}
 	defer sf.Close()
 
-	sfi, err := sf.Stat()
-	if err != nil {
-		return err
-	}
-
 	df, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
 	defer df.Close()
 
-	var reader io.Reader = sf
-	if opts.verbose {
-		reader = &progressReader{r: sf, total: sfi.Size(), verbose: true}
+	start := time.Now()
+	n, err := io.Copy(df, sf)
+	if err != nil {
+		return err
 	}
-
-	_, err = io.Copy(df, reader)
-	if opts.verbose {
-		fmt.Fprintln(os.Stderr)
+	if opts.stats != nil {
+		opts.stats.record(dest, n, time.Since(start))
 	}
-	return err
+	return nil
 }
