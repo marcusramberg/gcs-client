@@ -9,12 +9,15 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/urfave/cli/v3"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 
 	"github.com/marcusramberg/gcs-client/pkg/utils"
 )
@@ -30,6 +33,13 @@ var Command = &cli.Command{
 		&cli.StringFlag{Name: "cache-control", Usage: "Set cache-control header"},
 		&cli.StringFlag{Name: "content-type", Usage: "Set content-type header"},
 		&cli.StringFlag{Name: "storage-class", Usage: "Set storage class"},
+		&cli.IntFlag{
+			Name:        "parallelism",
+			Aliases:     []string{"j"},
+			Usage:       "Number of parallel copy workers",
+			Value:       0,
+			DefaultText: "number of CPU cores",
+		},
 	},
 	Action: func(ctx context.Context, cmd *cli.Command) error {
 		if cmd.Args().Len() < 2 {
@@ -48,8 +58,10 @@ var Command = &cli.Command{
 			contentType:  cmd.String("content-type"),
 			storageClass: cmd.String("storage-class"),
 		}
+		opts.parallelism = cmd.Int("parallelism")
+		opts.setDefaults()
 
-		client, err := utils.NewClient(ctx)
+		client, err := utils.NewClient(ctx, buildClientOptions(opts.parallelism)...)
 		if err != nil {
 			return fmt.Errorf("failed to create GCS client: %w", err)
 		}
@@ -65,6 +77,18 @@ var Command = &cli.Command{
 	},
 }
 
+// buildClientOptions returns the ClientOption slice for constructing a GCS
+// client with the given parallelism level.  A gRPC connection pool sized to
+// the parallelism level is included so that each concurrent upload goroutine
+// can use a dedicated TCP connection instead of contending on a single
+// multiplexed gRPC stream.
+func buildClientOptions(parallelism int) []option.ClientOption {
+	return []option.ClientOption{
+		option.WithGRPCConnectionPool(parallelism),
+		storage.WithDisabledClientMetrics(),
+	}
+}
+
 type copyOptions struct {
 	recursive    bool
 	noClobber    bool
@@ -72,6 +96,13 @@ type copyOptions struct {
 	cacheControl string
 	contentType  string
 	storageClass string
+	parallelism  int
+}
+
+func (o *copyOptions) setDefaults() {
+	if o.parallelism <= 0 {
+		o.parallelism = runtime.NumCPU()
+	}
 }
 
 type progressReader struct {
@@ -80,18 +111,21 @@ type progressReader struct {
 	current   int64
 	lastPrint time.Time
 	verbose   bool
+	mu        sync.Mutex
 }
 
 func (pr *progressReader) Read(p []byte) (int, error) {
 	n, err := pr.r.Read(p)
+	pr.mu.Lock()
 	pr.current += int64(n)
 	if pr.verbose {
-		pr.print()
+		pr.printLocked()
 	}
+	pr.mu.Unlock()
 	return n, err
 }
 
-func (pr *progressReader) print() {
+func (pr *progressReader) printLocked() {
 	if time.Since(pr.lastPrint) < 500*time.Millisecond {
 		return
 	}
@@ -121,14 +155,28 @@ func performCopy(ctx context.Context, client *storage.Client, src, dest string, 
 	}
 }
 
+type localCopyFn func(ctx context.Context, client *storage.Client, src, dest string, opts *copyOptions) error
+
 func copyLocalRecursive(ctx context.Context, client *storage.Client, src, dest string, opts *copyOptions) error {
+	return copyLocalRecursiveWithHook(ctx, client, src, dest, opts, func(ctx context.Context, cl *storage.Client, s, d string, o *copyOptions) error {
+		if strings.HasPrefix(d, "gs://") {
+			return copyLocalToGCS(ctx, cl, s, d, o)
+		}
+		return copyLocalToLocal(s, d, o)
+	})
+}
+
+func copyLocalRecursiveWithHook(ctx context.Context, client *storage.Client, src, dest string, opts *copyOptions, copyFn localCopyFn) error {
 	fi, err := os.Stat(src)
 	if err != nil || !fi.IsDir() {
 		return err
 	}
 	destIsGCS := strings.HasPrefix(dest, "gs://")
 
-	return filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
+	type job struct{ src, dest string }
+	var jobs []job
+
+	err = filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -139,16 +187,41 @@ func copyLocalRecursive(ctx context.Context, client *storage.Client, src, dest s
 		if err != nil {
 			return err
 		}
-		subDest := ""
+		var subDest string
 		if destIsGCS {
 			bucket, object, _, _ := utils.ParseGCSPath(dest)
 			subDest = "gs://" + path.Join(bucket, object, rel)
-			return copyLocalToGCS(ctx, client, p, subDest, opts)
 		} else {
 			subDest = filepath.Join(dest, rel)
-			return copyLocalToLocal(p, subDest, opts)
 		}
+		jobs = append(jobs, job{p, subDest})
+		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	return runPool(ctx, opts.parallelism, jobs, func(ctx context.Context, j job) error {
+		return copyFn(ctx, client, j.src, j.dest, opts)
+	})
+}
+
+// uploadChunkSize returns an appropriate resumable upload chunk size for a
+// file of the given byte size. For small files (below the SDK 16 MiB default)
+// we cap the chunk size slightly above the file size to avoid allocating a
+// full 16 MiB buffer per goroutine when many small files are uploaded in
+// parallel. For large files we use the SDK default so the upload is split
+// into sensible 16 MiB chunks.
+func uploadChunkSize(fileSize int64) int {
+	const sdkDefault = 16 * 1024 * 1024 // 16 MiB — matches storage.Writer default
+	const minChunk = 256 * 1024         // 256 KiB — GCS requires multiples of this
+
+	if fileSize >= sdkDefault {
+		return sdkDefault
+	}
+	// Round up to the next 256 KiB boundary above the file size.
+	chunks := max((fileSize+int64(minChunk)-1)/int64(minChunk), 1)
+	return int(chunks * int64(minChunk))
 }
 
 func copyLocalToGCS(ctx context.Context, client *storage.Client, src, dest string, opts *copyOptions) error {
@@ -192,7 +265,7 @@ func copyLocalToGCS(ctx context.Context, client *storage.Client, src, dest strin
 	if opts.storageClass != "" {
 		w.StorageClass = opts.storageClass
 	}
-	w.ChunkSize = 0 // Use single chunk upload
+	w.ChunkSize = uploadChunkSize(fi.Size())
 
 	var reader io.Reader = f
 	if opts.verbose {
@@ -267,6 +340,7 @@ func copyGCSToLocal(ctx context.Context, client *storage.Client, src, dest strin
 
 func copyGCSToLocalRecursive(ctx context.Context, client *storage.Client, bucketName, objectName, dest string, opts *copyOptions) error {
 	it := utils.RetryBucket(client, bucketName).Objects(ctx, &storage.Query{Prefix: objectName})
+	var allAttrs []*storage.ObjectAttrs
 	for {
 		attrs, err := it.Next()
 		if errors.Is(err, iterator.Done) {
@@ -275,6 +349,15 @@ func copyGCSToLocalRecursive(ctx context.Context, client *storage.Client, bucket
 		if err != nil {
 			return err
 		}
+		allAttrs = append(allAttrs, attrs)
+	}
+	return copyGCSToLocalRecursiveWithHook(ctx, client, bucketName, objectName, dest, opts, allAttrs, copyGCSToLocal)
+}
+
+func copyGCSToLocalRecursiveWithHook(ctx context.Context, client *storage.Client, bucketName, objectName, dest string, opts *copyOptions, allAttrs []*storage.ObjectAttrs, copyFn localCopyFn) error {
+	type job struct{ src, dest string }
+	jobs := make([]job, 0, len(allAttrs))
+	for _, attrs := range allAttrs {
 		rel, err := filepath.Rel(objectName, attrs.Name)
 		if err != nil {
 			rel = filepath.Base(attrs.Name)
@@ -283,11 +366,12 @@ func copyGCSToLocalRecursive(ctx context.Context, client *storage.Client, bucket
 		if err := os.MkdirAll(filepath.Dir(subDest), 0o755); err != nil {
 			return err
 		}
-		if err := copyGCSToLocal(ctx, client, "gs://"+path.Join(bucketName, attrs.Name), subDest, opts); err != nil {
-			return err
-		}
+		jobs = append(jobs, job{"gs://" + path.Join(bucketName, attrs.Name), subDest})
 	}
-	return nil
+
+	return runPool(ctx, opts.parallelism, jobs, func(ctx context.Context, j job) error {
+		return copyFn(ctx, client, j.src, j.dest, opts)
+	})
 }
 
 func copyGCSToGCS(ctx context.Context, client *storage.Client, src, dest string, opts *copyOptions) error {
@@ -348,6 +432,7 @@ func copyGCSToGCS(ctx context.Context, client *storage.Client, src, dest string,
 
 func copyGCSToGCSRecursive(ctx context.Context, client *storage.Client, srcBucket, srcObject, destBucket, destObject string, opts *copyOptions) error {
 	it := utils.RetryBucket(client, srcBucket).Objects(ctx, &storage.Query{Prefix: srcObject})
+	var allAttrs []*storage.ObjectAttrs
 	for {
 		attrs, err := it.Next()
 		if errors.Is(err, iterator.Done) {
@@ -356,16 +441,26 @@ func copyGCSToGCSRecursive(ctx context.Context, client *storage.Client, srcBucke
 		if err != nil {
 			return err
 		}
+		allAttrs = append(allAttrs, attrs)
+	}
+	return copyGCSToGCSRecursiveWithHook(ctx, client, srcBucket, srcObject, destBucket, destObject, opts, allAttrs, copyGCSToGCS)
+}
+
+func copyGCSToGCSRecursiveWithHook(ctx context.Context, client *storage.Client, srcBucket, srcObject, destBucket, destObject string, opts *copyOptions, allAttrs []*storage.ObjectAttrs, copyFn localCopyFn) error {
+	type job struct{ src, dest string }
+	jobs := make([]job, 0, len(allAttrs))
+	for _, attrs := range allAttrs {
 		rel, err := filepath.Rel(srcObject, attrs.Name)
 		if err != nil {
 			rel = filepath.Base(attrs.Name)
 		}
 		subDest := "gs://" + path.Join(destBucket, destObject, rel)
-		if err := copyGCSToGCS(ctx, client, "gs://"+path.Join(srcBucket, attrs.Name), subDest, opts); err != nil {
-			return err
-		}
+		jobs = append(jobs, job{"gs://" + path.Join(srcBucket, attrs.Name), subDest})
 	}
-	return nil
+
+	return runPool(ctx, opts.parallelism, jobs, func(ctx context.Context, j job) error {
+		return copyFn(ctx, client, j.src, j.dest, opts)
+	})
 }
 
 func copyLocalToLocal(src, dest string, opts *copyOptions) error {

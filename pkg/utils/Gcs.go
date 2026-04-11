@@ -13,10 +13,18 @@ import (
 
 var ErrInvalidGCSPath = errors.New("invalid GCS path")
 
-// NewClient creates a new GCS client using the JSON api
+// NewClient creates a new GCS client using the gRPC transport.
+// The gRPC client enables DirectPath on GCP infrastructure, routing traffic
+// over Google's internal network for significantly higher throughput.
+//
+// gRPC client metrics are disabled by default: the SDK logs a warning when it
+// cannot find a GCP project to export telemetry to Cloud Monitoring, which is
+// noise for a CLI tool.  Callers that want metrics can pass their own
+// meterProvider via storage options.
 func NewClient(ctx context.Context, opts ...option.ClientOption) (*storage.Client, error) {
-	finalOpts := append([]option.ClientOption{storage.WithJSONReads()}, opts...)
-	return storage.NewClient(ctx, finalOpts...)
+	// Prepend so caller-supplied options take precedence.
+	allOpts := append([]option.ClientOption{storage.WithDisabledClientMetrics()}, opts...)
+	return storage.NewGRPCClient(ctx, allOpts...)
 }
 
 // RetryObject returns an ObjectHandle with RetryAlways policy.
