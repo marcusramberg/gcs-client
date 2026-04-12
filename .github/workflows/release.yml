@@ -56,7 +56,7 @@ jobs:
       - run: upx --best -q --force-macos ${{ env.BINARY_NAME }}
 
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: github.ref_type == 'tag'
         with:
           files: ${{ env.BINARY_NAME }}
