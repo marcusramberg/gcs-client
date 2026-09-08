@@ -1,11 +1,11 @@
 module github.com/marcusramberg/gcs-client
 
-go 1.25.1
+go 1.26.0
 
 require (
 	cloud.google.com/go/storage v1.62.0
 	github.com/urfave/cli/v3 v3.6.1
-	golang.org/x/sync v0.20.0
+	golang.org/x/sync v0.23.0
 	google.golang.org/api v0.275.0
 )
 
